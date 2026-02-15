@@ -15,6 +15,8 @@ import (
 //go:embed web/*
 var webFS embed.FS
 
+const closeReplaced = 4001
+
 type Server struct {
 	hid  *hid.Device
 	http *http.Server
@@ -67,7 +69,7 @@ func (s *Server) setConn(c *websocket.Conn) {
 	if s.conn != nil {
 		_ = s.conn.WriteMessage(
 			websocket.CloseMessage,
-			websocket.FormatCloseMessage(websocket.CloseNormalClosure, "replaced by new connection"),
+			websocket.FormatCloseMessage(closeReplaced, "replaced by new connection"),
 		)
 		_ = s.conn.Close()
 	}

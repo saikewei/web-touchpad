@@ -21,7 +21,7 @@ func main() {
 	srv := server.New(dev)
 
 	go func() {
-		if err := srv.Run(":8080"); err != nil {
+		if err := srv.Run(":3000"); err != nil {
 			log.Printf("server stopped: %v", err)
 		}
 	}()

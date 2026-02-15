@@ -3,6 +3,14 @@ const SENSITIVITY = 2.5; // 鼠标灵敏度
 const SCROLL_SENSITIVITY = 0.1; // 滚轮灵敏度
 const WS_URL = `ws://${window.location.host}/ws`;
 
+const TAP_MAX_TIME = 200; // ms
+const TAP_MAX_MOVE = 10;  // px
+
+let tapStartX = 0;
+let tapStartY = 0;
+let tapStartTime = 0;
+let tapCandidate = false;
+
 // 消息类型定义
 const MSG_TYPE = {
   MOUSE_MOVE: 0x01, // 鼠标移动
@@ -40,9 +48,12 @@ const hiddenInput = document.getElementById("hidden-input");
 
 // --- WebSocket 连接逻辑 ---
 function connect() {
-  console.log("正在连接到:", WS_URL);
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+    return;
+  }
+
   ws = new WebSocket(WS_URL);
-  ws.binaryType = "arraybuffer"; // 设置为二进制模式
+  ws.binaryType = "arraybuffer";
 
   ws.onopen = () => {
     statusEl.textContent = "🟢 已连接";
@@ -50,9 +61,20 @@ function connect() {
     retryCount = 0;
   };
 
-  ws.onclose = () => {
+  ws.onclose = (e) => {
     statusEl.textContent = "🔴 已断开，尝试重连...";
     statusEl.className = "disconnected";
+
+    // 如果是“被新连接踢掉”，不要重连
+    if (e.code === 4001) {
+      console.log("WS 被新连接替换，停止重连");
+      return;
+    }
+
+    if (!shouldReconnect) {
+      return;
+    }
+
     const delay = Math.min(Math.pow(2, retryCount) * 1000, 10000);
     setTimeout(() => {
       retryCount++;
@@ -144,10 +166,15 @@ touchZone.addEventListener(
   "touchstart",
   (e) => {
     if (e.touches.length === 1) {
-      // 单指模式：鼠标移动
       isScrollMode = false;
       lastX = e.touches[0].clientX;
       lastY = e.touches[0].clientY;
+
+      // 轻点候选开始
+      tapStartX = lastX;
+      tapStartY = lastY;
+      tapStartTime = Date.now();
+      tapCandidate = true;
     } else if (e.touches.length === 2) {
       // 双指模式：滚轮
       isScrollMode = true;
@@ -164,6 +191,15 @@ touchZone.addEventListener(
   "touchmove",
   (e) => {
     e.preventDefault();
+
+    // 轻点候选判定：移动过大则取消
+    if (tapCandidate && e.touches.length === 1) {
+      const dx = e.touches[0].clientX - tapStartX;
+      const dy = e.touches[0].clientY - tapStartY;
+      if (Math.hypot(dx, dy) > TAP_MAX_MOVE) {
+        tapCandidate = false;
+      }
+    }
 
     if (e.touches.length === 1 && !isScrollMode) {
       // 单指移动：鼠标指针
@@ -184,17 +220,14 @@ touchZone.addEventListener(
       const center = getTouchCenter(e.touches[0], e.touches[1]);
       const currentDistance = getTouchDistance(e.touches[0], e.touches[1]);
 
-      // 垂直滚动（主要使用 Y 轴变化）
       const deltaY = (center.y - lastY) * SCROLL_SENSITIVITY;
-
-      // 水平滚动（可选，使用 X 轴变化）
       const deltaX = (center.x - lastX) * SCROLL_SENSITIVITY;
 
       if (Math.abs(deltaY) > 0.5 || Math.abs(deltaX) > 0.5) {
         send(
           createScrollMsg(
             Math.round(deltaX),
-            Math.round(deltaY), // 反转 Y 轴以符合自然滚动习惯
+            Math.round(-deltaY),
           ),
         );
       }
@@ -210,6 +243,16 @@ touchZone.addEventListener(
 touchZone.addEventListener(
   "touchend",
   (e) => {
+    // 轻点判定：单指结束且未移动过大
+    if (tapCandidate && e.touches.length === 0) {
+      const dt = Date.now() - tapStartTime;
+      if (dt <= TAP_MAX_TIME) {
+        send(createMouseClickMsg(MOUSE_BUTTON.LEFT, MOUSE_STATE.DOWN));
+        send(createMouseClickMsg(MOUSE_BUTTON.LEFT, MOUSE_STATE.UP));
+      }
+    }
+    tapCandidate = false;
+
     // 重置状态
     if (e.touches.length < 2) {
       isScrollMode = false;
@@ -221,45 +264,6 @@ touchZone.addEventListener(
   },
   { passive: false },
 );
-
-// --- 模拟鼠标点击 ---
-function bindMouseBtn(el, button) {
-  el.addEventListener("touchstart", (e) => {
-    e.preventDefault();
-    send(createMouseClickMsg(button, MOUSE_STATE.DOWN));
-  });
-
-  el.addEventListener("touchend", (e) => {
-    e.preventDefault();
-    send(createMouseClickMsg(button, MOUSE_STATE.UP));
-  });
-}
-
-bindMouseBtn(btnLeft, MOUSE_BUTTON.LEFT);
-bindMouseBtn(btnRight, MOUSE_BUTTON.RIGHT);
-
-// --- 键盘唤起逻辑 ---
-btnKeyboard.addEventListener("click", () => {
-  if (!isKeyboardActive) {
-    hiddenInput.focus();
-    isKeyboardActive = true;
-  } else {
-    hiddenInput.blur();
-    isKeyboardActive = false;
-  }
-});
-
-// 监听输入框获得焦点
-hiddenInput.addEventListener("focus", () => {
-  btnKeyboard.style.backgroundColor = "#4caf50";
-  isKeyboardActive = true;
-});
-
-// 监听输入框失去焦点（键盘关闭）
-hiddenInput.addEventListener("blur", () => {
-  btnKeyboard.style.backgroundColor = "";
-  isKeyboardActive = false;
-});
 
 hiddenInput.addEventListener("input", (e) => {
   const char = e.data;
@@ -276,6 +280,15 @@ hiddenInput.addEventListener("keydown", (e) => {
     send(createKeyboardMsg("\n")); // Enter 用 \n 表示
   }
 });
+
+// 页面离开时不重连，并主动关闭
+window.addEventListener("pagehide", () => {
+  shouldReconnect = false;
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.close(1000, "pagehide");
+  }
+});
+
 
 // 初始化
 connect();
